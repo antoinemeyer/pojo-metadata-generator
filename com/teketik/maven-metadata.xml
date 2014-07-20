@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<metadata>
+  <plugins>
+    <plugin>
+      <name>pojo-metadata-generator Maven Mojo</name>
+      <prefix>pmg</prefix>
+      <artifactId>pmg-maven-plugin</artifactId>
+    </plugin>
+  </plugins>
+</metadata>
