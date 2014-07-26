@@ -1,40 +1,36 @@
 package com.teketik.pmg;
 
+import japa.parser.JavaParser;
+import japa.parser.ParseException;
+import japa.parser.ast.ImportDeclaration;
+import japa.parser.ast.body.FieldDeclaration;
+import japa.parser.ast.type.ClassOrInterfaceType;
+import japa.parser.ast.type.PrimitiveType;
+import japa.parser.ast.type.ReferenceType;
+import japa.parser.ast.visitor.VoidVisitorAdapter;
+
 import java.io.File;
 import java.io.IOException;
-import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
-import java.lang.reflect.ParameterizedType;
-import java.lang.reflect.Type;
-import java.net.MalformedURLException;
-import java.net.URL;
-import java.net.URLClassLoader;
-import java.util.Collection;
 import java.util.Collections;
-import java.util.HashSet;
-import java.util.LinkedList;
 import java.util.List;
-import java.util.Set;
+import java.util.Map;
+import java.util.Map.Entry;
 
-import org.apache.maven.artifact.DependencyResolutionRequiredException;
 import org.apache.maven.plugin.AbstractMojo;
 import org.apache.maven.plugin.MojoExecutionException;
 import org.apache.maven.plugins.annotations.Component;
-import org.apache.maven.plugins.annotations.LifecyclePhase;
 import org.apache.maven.plugins.annotations.Mojo;
 import org.apache.maven.plugins.annotations.Parameter;
 import org.apache.maven.plugins.annotations.ResolutionScope;
 import org.apache.maven.project.MavenProject;
 import org.codehaus.plexus.util.FileUtils;
-import org.reflections.Reflections;
-import org.reflections.scanners.ResourcesScanner;
-import org.reflections.scanners.SubTypesScanner;
-import org.reflections.util.ClasspathHelper;
-import org.reflections.util.ConfigurationBuilder;
-import org.reflections.util.FilterBuilder;
 
+import com.google.common.base.Optional;
+import com.google.common.base.Predicate;
+import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
-import com.google.common.collect.Multisets;
+import com.google.common.collect.Maps;
 import com.sun.codemodel.ClassType;
 import com.sun.codemodel.JClassAlreadyExistsException;
 import com.sun.codemodel.JCodeModel;
@@ -45,25 +41,58 @@ import com.sun.codemodel.JFieldVar;
 import com.sun.codemodel.JMethod;
 import com.sun.codemodel.JMod;
 
-@Mojo(name = "pmg", defaultPhase = LifecyclePhase.PROCESS_CLASSES, requiresDependencyResolution = ResolutionScope.COMPILE)
+/**
+ * @goal pmg
+ * @requiresDependencyResolution compile
+ */
+@Mojo(name = "pmg", requiresDependencyResolution = ResolutionScope.COMPILE)
 public class MetadataGenerator extends AbstractMojo {
 	
-	public static final String DEFAULT_TARGET = "./target/pmg";
-
+	/**
+	 * @component
+	 */
 	@Component
 	private MavenProject project;
 
+    /**
+     * @parameter
+     */
 	@Parameter
 	private String[] packages;
-	
+	  
+	/** 
+     * @parameter expression="${project.build.sourceDirectory}"
+     */
 	@Parameter
-	private String target;
+    private File sourceDirectory;
+	
+	/**
+	 * @parameter default-value="./target/pmg"
+	 */
+	@Parameter
+	private String target = "./target/pmg";
 	
 	private File targetDirectory;
 
+	/**
+	 * @parameter default-value=1
+	 */
 	@Parameter
 	private int depthLimit = 1;
 
+	private class VisitResult {
+		List<FieldDeclaration> fields = Lists.newArrayList();
+		List<ImportDeclaration> imports = Lists.newArrayList();
+	}
+	
+	//simple class name to visitresults
+	private Map<String, VisitResult> map = Maps.newHashMap(); 
+	//full class name to visitresults
+	private Map<String, VisitResult> fullNamesMap = Maps.newHashMap();
+	//simple name to fullname
+	private Map<String,String> simpleNameToFullName = Maps.newHashMap();
+	
+	@SuppressWarnings("unchecked")
 	public void execute() throws MojoExecutionException {
 		getLog().info("--Processing Pojo Metadata Generator--");
 
@@ -73,10 +102,6 @@ public class MetadataGenerator extends AbstractMojo {
 		}
 		
 		//initialize target path
-		if (target == null) {
-			target = DEFAULT_TARGET;
-		}
-		//clear it
 		try {
 			FileUtils.deleteDirectory(target);
 		}
@@ -85,118 +110,194 @@ public class MetadataGenerator extends AbstractMojo {
 		}
 		targetDirectory = new File(target);
 		targetDirectory.mkdirs();
+		getLog().info("writing in: "+targetDirectory.getAbsolutePath());
 		
-		// prepare classloader
-		Set<URL> urls = new HashSet<URL>();
-		try {
-			for (Object element : project.getCompileClasspathElements()) {
-				urls.add(new File(element.toString()).toURI().toURL());
-			}
-		}
-		catch (MalformedURLException|DependencyResolutionRequiredException e1) {
-			throw new MojoExecutionException("Cannot prepare classloader", e1);
-		}
-		ClassLoader contextClassLoader = URLClassLoader.newInstance(urls.toArray(new URL[0]), Thread.currentThread()
-				.getContextClassLoader());
-		Thread.currentThread().setContextClassLoader(contextClassLoader);
-
 		// scan packages
 		for (String packageName : packages) {
+
+			//get src directory
+			File srcPackage = new File(sourceDirectory + "/" + packageName.replace(".", "/"));
+			
 			getLog().info("Scanning package: " + packageName);
 
-			List<ClassLoader> classLoadersList = new LinkedList<ClassLoader>();
-			classLoadersList.add(ClasspathHelper.contextClassLoader());
-			classLoadersList.add(ClasspathHelper.staticClassLoader());
+			try {
 
-			Reflections reflections = new Reflections(new ConfigurationBuilder()
-					.setScanners(new SubTypesScanner(false /* don't exclude Object.class */), new ResourcesScanner())
-					.setUrls(ClasspathHelper.forClassLoader(classLoadersList.toArray(new ClassLoader[0])))
-					.filterInputsBy(new FilterBuilder().include(FilterBuilder.prefix(packageName))));
+				for (final File f : srcPackage.listFiles()) {
+					final String javaName = f.getName().split("\\.")[0];
+					getLog().info("extracting fields from class: "+javaName);
 
-			Set<Class<? extends Object>> subTypes = reflections.getSubTypesOf(Object.class);
-			for (Class<? extends Object> subType : subTypes) {
-				try {
-					writeClass(subType, subTypes);
+			        new VoidVisitorAdapter() {
+
+			        	@Override
+			        	public void visit(ImportDeclaration n, Object arg) {
+			        		if (map.get(javaName) == null) {
+			        			map.put(javaName, new VisitResult());
+			        		}
+			        		map.get(javaName).imports.add(n);
+			        	};
+			        	
+			        	@Override
+			        	public void visit(FieldDeclaration arg0, Object arg1) {
+			        		if (map.get(javaName) == null) {
+			        			map.put(javaName, new VisitResult());
+			        		}
+			        		map.get(javaName).fields.add(arg0);
+			        	}
+			        	
+			        }.visit(JavaParser.parse(f), null);
 				}
-				catch (JClassAlreadyExistsException | IOException e) {
-					getLog().warn("Cannot generate metadata of "+subType.getName(), e);
+				
+			} catch (IOException | ParseException e) {
+				throw new MojoExecutionException("exception while scanning package "+packageName, e);				
+			}
+		
+			//fill the missing packages in the fields
+			for (Entry<String, VisitResult> entry : map.entrySet()) {
+
+				//add the package name to the class names
+				for (FieldDeclaration field : entry.getValue().fields) {
+					
+					final String typeName = getTypeName(field);
+	        		
+					//check if this field is in the import
+	        		Optional<ImportDeclaration> tryFind = Iterables.tryFind(entry.getValue().imports, new Predicate<ImportDeclaration>() {
+	        			@Override
+	        			public boolean apply(ImportDeclaration input) {
+	        				return input.getName().getName().equals(typeName);
+	        			}
+	        		});
+	        		if (tryFind.isPresent()) {
+	        			field.setType(new ClassOrInterfaceType(tryFind.get().getName().toString()));
+	        		} 
+	        		//if it is not in the imports
+	        		else {
+	        			//check if it is in another file in this package
+	        			Optional<String> tryFind2 = Iterables.tryFind(map.keySet(), new Predicate<String>() {
+	        				@Override
+	        				public boolean apply(String input) {
+	        					String string = input.split("\\.")[0];
+	        					System.out.println(string + " - "+typeName);
+								return string.equals(typeName);
+	        				}
+	        			});
+	        			if (tryFind2.isPresent()) {
+	        				String fullName = packageName+"."+typeName;
+							field.setType(new ClassOrInterfaceType(fullName));
+	        				simpleNameToFullName.put(typeName, fullName);	        				
+	        			} 
+	        			//if it's not, it is a java.lang
+	        			else {
+	        				field.setType(new ClassOrInterfaceType("java.lang."+typeName));
+	        			}
+	        		}
+					
 				}
+				
 			}
 
+			//fill the missing packages in the full names map map
+			for (Entry<String, String> entry : simpleNameToFullName.entrySet()) {
+				fullNamesMap.put(entry.getValue(), map.get(entry.getKey()));
+			}
+			
+			//now write all the model files
+			for (Entry<String, VisitResult> entry : fullNamesMap.entrySet()) {
+				process(entry.getKey(), entry.getValue().fields);
+			}
+			
 		}
-
+		
 		getLog().info("--------------------------------------");
 	}
 
-	private void writeClass(Class<? extends Object> clazz, Set<Class<? extends Object>> subTypes) throws JClassAlreadyExistsException, IOException {
-		getLog().info("processing class: "+clazz.getName());
-		
-		JCodeModel cm = new JCodeModel();
-		JDefinedClass enumClass = cm._class(clazz.getName()+"MetaData", ClassType.ENUM);
-		
-		//define field type
-        JFieldVar typeField = enumClass.field(JMod.PRIVATE|JMod.FINAL, Class.class, "type");
-		
-        //create constructor
-        JMethod enumConstructor = enumClass.constructor(JMod.PRIVATE);
-        enumConstructor.param(Class.class, "type");
-        enumConstructor.body().assign(JExpr._this().ref ("type"), JExpr.ref("type"));
-        
-        //getters
-        JMethod getterFilterMethod = enumClass.method(JMod.PUBLIC, Class.class, "type");
-        getterFilterMethod.body()._return(typeField);
- 
-        //then process all the fields
-        boolean processed = processFields(clazz, subTypes, enumClass, "");
 
-        //also override the toString() method to return the value with dots instead of _
-        JMethod toStringMethod = enumClass.method(JMod.PUBLIC, String.class, "toString");
-        toStringMethod.body()._return(JExpr.direct("name().replace(\"_\",\".\")"));
-        
-        /*
-         * Only generate the enum file if we have processed at least one field 
-         * (as it would create an incorrect enum otherwise) 
-         */
-        
-        //if we have processed at least one field
-        if (processed) {
+	private String getTypeName(FieldDeclaration field) {
+		final String typeName;
+		if (field.getType() instanceof PrimitiveType) {
+			typeName = ((PrimitiveType) field.getType()).getType().name();
+		} else {
+			typeName = ((ClassOrInterfaceType)((ReferenceType)field.getType()).getType()).getName();
+		}
+		return typeName;
+	}
 
-        	//write the file
-        	cm.build(targetDirectory);
-        }
+	
+
+	public void process(String clazz, List<FieldDeclaration> fields) throws MojoExecutionException {
+		
+		try {
+
+			JCodeModel cm = new JCodeModel();
+			JDefinedClass enumClass;
+			enumClass = cm._class(clazz+"MetaData", ClassType.ENUM)._implements(MetaData.class);
+			
+			//define field type
+	        JFieldVar typeField = enumClass.field(JMod.PRIVATE|JMod.FINAL, Class.class, "type");
+			
+	        //create constructor
+	        JMethod enumConstructor = enumClass.constructor(JMod.PRIVATE);
+	        enumConstructor.param(Class.class, "type");
+	        enumConstructor.body().assign(JExpr._this().ref ("type"), JExpr.ref("type"));
+	        
+	        //getters
+	        JMethod getterFilterMethod = enumClass.method(JMod.PUBLIC, Class.class, "type");
+	        getterFilterMethod.body()._return(typeField);
+	 
+	        //then process all the fields
+	        boolean processed = processFields(clazz, fields, enumClass, "");
+
+	        //also override the toString() method to return the value with dots instead of _
+	        JMethod toStringMethod = enumClass.method(JMod.PUBLIC, String.class, "toString");
+	        toStringMethod.body()._return(JExpr.direct("name().replace(\"_\",\".\")"));
+	        
+	        /*
+	         * Only generate the enum file if we have processed at least one field 
+	         * (as it would create an incorrect enum otherwise) 
+	         */
+	        
+	        //if we have processed at least one field
+	        if (processed) {
+
+	        	//write the file
+	        	cm.build(targetDirectory);
+	        }
+			
+		}
+		catch (JClassAlreadyExistsException | IOException | ClassNotFoundException e) {
+			throw new MojoExecutionException("exception while processing "+clazz, e);				
+		}
 		
 	}
 
-	private boolean processFields(Class<? extends Object> clazz, Set<Class<? extends Object>> subTypes, JDefinedClass enumClass, String base) {
+	private boolean processFields(String clazz, List<FieldDeclaration> fields, JDefinedClass enumClass, String base) throws ClassNotFoundException {
 		boolean processed = false;
-		for (Field field : clazz.getDeclaredFields()) {
+		for (FieldDeclaration field : fields) {
 
         	//if not static
         	if (!Modifier.isStatic(field.getModifiers())) {
 
-        		getLog().info("generating field: "+base + field.getName());
+        		String fieldName = field.getVariables().get(0).getId().getName();
+        		String typeName = ((ClassOrInterfaceType)field.getType()).getName();
+
+				getLog().info("generating field: "+base + fieldName);
         		processed = true;
         		
         		//generate 
-        		JEnumConstant enumConst = enumClass.enumConstant(base + field.getName());
-        		enumConst.arg(JExpr.direct(field.getType().getName()+".class"));
-        		
-
+        		JEnumConstant enumConst = enumClass.enumConstant(base + fieldName);
+				enumConst.arg(JExpr.direct(typeName+".class"));
+				
         		//if this field is a subtype
         		//or a collection of subtype
-        		Class<?> type;
-        		if (Collection.class.isAssignableFrom(field.getType())) {
-					type = (Class<?>) ((ParameterizedType) field.getGenericType()).getActualTypeArguments()[0];
-        		} else {
-        			type = field.getType();
-        		}
-				if (subTypes.contains(type)) {
+//        		if (Collection.class.isAssignableFrom(type)) {//TODO check
+//					type = (Class<?>) ((ParameterizedType) field.getGenericType()).getActualTypeArguments()[0];
+//        		} else
+				if (fullNamesMap.containsKey(typeName)) {
         			
         			//if we have not reached the depth limit
-        			if (Collections.frequency(Lists.newArrayList(base.split("_")), field.getName()) < depthLimit) {
+        			if (Collections.frequency(Lists.newArrayList(base.split("_")), fieldName) < depthLimit) {
         				
         				//compute all possibilities
-        				processFields(type, subTypes, enumClass, base + field.getName() + "_");
+        				processFields(typeName, fullNamesMap.get(typeName).fields, enumClass, base + fieldName + "_");
         				
         			}
         		}
@@ -205,7 +306,6 @@ public class MetadataGenerator extends AbstractMojo {
 		}
 		return processed;
 	}
-	
 	
 	
 }

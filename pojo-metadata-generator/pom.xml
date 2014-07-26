@@ -4,7 +4,7 @@
 
 	<groupId>com.teketik</groupId>
 	<artifactId>pmg-maven-plugin</artifactId>
-	<version>1.1-SNAPSHOT</version>
+	<version>1.11</version>
 
 	<packaging>maven-plugin</packaging>
 	<name>pojo-metadata-generator Maven Mojo</name>
@@ -13,6 +13,7 @@
 	<properties>
 		<maven.compiler.source>1.7</maven.compiler.source>
 		<maven.compiler.target>1.7</maven.compiler.target>
+		<github.global.server>github</github.global.server>
 	</properties>
 
 	<dependencies>
@@ -27,6 +28,12 @@
 			<groupId>org.apache.maven</groupId>
 			<artifactId>maven-plugin-api</artifactId>
 			<version>3.0.4</version>
+			<exclusions>
+				<exclusion>
+					<artifactId>sisu-guava</artifactId>
+					<groupId>org.sonatype.sisu</groupId>
+				</exclusion>
+			</exclusions>
 		</dependency>
 
 		<dependency>
@@ -44,12 +51,6 @@
 		</dependency>
 
 		<dependency>
-			<groupId>org.reflections</groupId>
-			<artifactId>reflections</artifactId>
-			<version>0.9.9-RC2</version>
-		</dependency>
-
-		<dependency>
 			<groupId>com.sun.codemodel</groupId>
 			<artifactId>codemodel</artifactId>
 			<version>2.6</version>
@@ -61,9 +62,60 @@
 			<version>17.0</version>
 		</dependency>
 
+		<dependency>
+			<groupId>com.google.code.javaparser</groupId>
+			<artifactId>javaparser</artifactId>
+			<version>1.0.8</version>
+		</dependency>
+
 	</dependencies>
 
+	<distributionManagement>
+		<repository>
+			<id>internal.repo</id>
+			<name>Temporary Staging Repository</name>
+			<url>file://${project.build.directory}/mvn-repo</url>
+		</repository>
+	</distributionManagement>
+
+
+
 	<build>
+		<plugins>
+			<plugin>
+				<artifactId>maven-deploy-plugin</artifactId>
+				<version>2.8.1</version>
+				<configuration>
+					<altDeploymentRepository>internal.repo::default::file://${project.build.directory}/mvn-repo</altDeploymentRepository>
+				</configuration>
+			</plugin>
+			<plugin>
+				<groupId>com.github.github</groupId>
+				<artifactId>site-maven-plugin</artifactId>
+				<version>0.9</version>
+				<configuration>
+					<message>Maven artifacts for ${project.version}</message>  <!-- git commit message -->
+					<noJekyll>true</noJekyll>                                  <!-- disable webpage processing -->
+					<outputDirectory>${project.build.directory}/mvn-repo</outputDirectory> <!-- matches distribution management repository url above -->
+					<branch>refs/heads/mvn-repo</branch>                       <!-- remote branch name -->
+					<includes>
+						<include>**/*</include>
+					</includes>
+					<repositoryName>pojo-metadata-generator</repositoryName>
+					<repositoryOwner>antoinemeyer</repositoryOwner>
+				</configuration>
+				<executions>
+					<!-- run site-maven-plugin's 'site' target as part of the build's normal 
+						'deploy' phase -->
+					<execution>
+						<goals>
+							<goal>site</goal>
+						</goals>
+						<phase>deploy</phase>
+					</execution>
+				</executions>
+			</plugin>
+		</plugins>
 		<pluginManagement>
 			<plugins>
 				<plugin>
