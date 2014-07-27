@@ -86,6 +86,8 @@ public class MetadataGenerator extends AbstractMojo {
 	private Map<String, VisitResult> fullNamesMap = Maps.newHashMap();
 	//simple name to fullname
 	private Map<String,String> simpleNameToFullName = Maps.newHashMap();
+
+	private JDefinedClassHolder classHolder;
 	
 	@SuppressWarnings("unchecked")
 	public void execute() throws MojoExecutionException {
@@ -237,46 +239,29 @@ public class MetadataGenerator extends AbstractMojo {
 		return typeName;
 	}
 
-	
-	/*
-	 * http://namanmehta.blogspot.fr/2010/01/use-codemodel-to-generate-java-source.html
-	 * 
-	 * 
-	 */
+	private class JDefinedClassHolder {
+		private JDefinedClass main;
+		private JDefinedClass fields;
+		private JDefinedClass models;
+	}
 	
 	public void process(String clazz, List<FieldDeclaration> fields) throws MojoExecutionException {
+		JCodeModel cm = new JCodeModel();
 		
 		try {
-
-			JCodeModel cm = new JCodeModel();
-			JDefinedClass enumClass;
-			enumClass = cm._class(clazz+"MetaData", ClassType.ENUM)._implements(MetaData.class);
+			classHolder = new JDefinedClassHolder();
 			
-			//define field type
-	        JFieldVar typeField = enumClass.field(JMod.PRIVATE|JMod.FINAL, cm.ref(Class.class), "type");
-	        JFieldVar typeArgsField = enumClass.field(JMod.PRIVATE|JMod.FINAL, cm.ref(Class.class).array(), "typeArgs");
+			classHolder.main = cm._class(clazz+"MetaData");
 			
-	        //create constructor
-	        JMethod enumConstructor = enumClass.constructor(JMod.PRIVATE);
-	        enumConstructor.param(cm.ref(Class.class), "type");
-	        enumConstructor.varParam(cm.ref(Class.class), "typeArgs");
-	        enumConstructor.body().assign(JExpr._this().ref ("type"), JExpr.ref("type"));
-	        enumConstructor.body().assign(JExpr._this().ref ("typeArgs"), JExpr.ref("typeArgs"));
-	        
-	        //getters
-	        JMethod getterTypeMethod = enumClass.method(JMod.PUBLIC, cm.ref(Class.class), "type");
-	        getterTypeMethod.body()._return(typeField);
-	 
-	        JMethod getterTypeArgs = enumClass.method(JMod.PUBLIC, cm.ref(Class.class).array(), "typeArgs");
-	        getterTypeArgs.body()._return(typeArgsField);
+			classHolder.fields = classHolder.main._enum("EmbeddedFieldMetaData")._implements(FieldMetaData.class);
+			classHolder.models = classHolder.main._enum("EmbeddedModelMetaData")._implements(ModelMetaData.class);
+			
+			generateEnum(cm, classHolder.fields);
+			generateEnum(cm, classHolder.models);
 	        
 	        //then process all the fields
-	        boolean processed = processFields(clazz, fields, enumClass, "");
+	        boolean processed = processFields(clazz, fields, "");
 
-	        //also override the toString() method to return the value with dots instead of _
-	        JMethod toStringMethod = enumClass.method(JMod.PUBLIC, String.class, "toString");
-	        toStringMethod.body()._return(JExpr.direct("name().replace(\"_\",\".\")"));
-	        
 	        /*
 	         * Only generate the enum file if we have processed at least one field 
 	         * (as it would create an incorrect enum otherwise) 
@@ -296,7 +281,32 @@ public class MetadataGenerator extends AbstractMojo {
 		
 	}
 
-	private boolean processFields(String clazz, List<FieldDeclaration> fields, JDefinedClass enumClass, String base) throws ClassNotFoundException {
+
+	private void generateEnum(JCodeModel cm, JDefinedClass enumClass) {
+		//define field type
+		JFieldVar typeField = enumClass.field(JMod.PRIVATE|JMod.FINAL, cm.ref(Class.class), "type");
+		JFieldVar typeArgsField = enumClass.field(JMod.PRIVATE|JMod.FINAL, cm.ref(Class.class).array(), "typeArgs");
+		
+		//create constructor
+		JMethod enumConstructor = enumClass.constructor(JMod.PRIVATE);
+		enumConstructor.param(cm.ref(Class.class), "type");
+		enumConstructor.varParam(cm.ref(Class.class), "typeArgs");
+		enumConstructor.body().assign(JExpr._this().ref ("type"), JExpr.ref("type"));
+		enumConstructor.body().assign(JExpr._this().ref ("typeArgs"), JExpr.ref("typeArgs"));
+		
+		//getters
+		JMethod getterTypeMethod = enumClass.method(JMod.PUBLIC, cm.ref(Class.class), "type");
+		getterTypeMethod.body()._return(typeField);
+ 
+		JMethod getterTypeArgs = enumClass.method(JMod.PUBLIC, cm.ref(Class.class).array(), "typeArgs");
+		getterTypeArgs.body()._return(typeArgsField);
+		
+		//also override the toString() method to return the value with dots instead of _
+		JMethod toStringMethod = enumClass.method(JMod.PUBLIC, String.class, "toString");
+		toStringMethod.body()._return(JExpr.direct("name().replace(\"_\",\".\")"));
+	}
+
+	private boolean processFields(String clazz, List<FieldDeclaration> fields, String base) throws ClassNotFoundException {
 		boolean processed = false;
 		for (FieldDeclaration field : fields) {
 
@@ -310,22 +320,37 @@ public class MetadataGenerator extends AbstractMojo {
 				getLog().info("generating field: "+base + fieldName);
         		processed = true;
         		
-        		//generate 
+        		//define to which enum this field belongs to
+        		JDefinedClass enumClass;
+        		Class rootEnum;
+        		if (isModel(type)) {
+        			enumClass = classHolder.models;
+        			rootEnum = ModelMetaData.class;
+        		} else {
+        			enumClass = classHolder.fields;
+        			rootEnum = FieldMetaData.class;
+        		}
+        		
+        		//write it
         		JEnumConstant enumConst = enumClass.enumConstant(base + fieldName);
-				enumConst.arg(JExpr.direct(typeName+".class"));
-				
-				//if this field is a collection
-				//process type args
-				if (type.getTypeArgs() != null) {
-					for (Type typeArg : type.getTypeArgs()) {
-						String typeArgName = getTypeName(typeArg);
-						processModelTypeName(enumClass, base, fieldName, typeArgName);
-						enumConst.arg(JExpr.direct(typeArgName+".class"));
-					}
-				}
+        		enumConst.arg(JExpr.direct(typeName+".class"));
+
+        		//if this field is a collection
+        		//process type args
+        		if (type.getTypeArgs() != null) {
+        			for (Type typeArg : type.getTypeArgs()) {
+        				String typeArgName = getTypeName(typeArg);
+        				processModelTypeName(classHolder, base, fieldName, typeArgName);
+        				enumConst.arg(JExpr.direct(typeArgName+".class"));
+        			}
+        		}
+        		
+        		//write in the main
+        		JFieldVar mainField = classHolder.main.field(JMod.PUBLIC|JMod.STATIC|JMod.FINAL, rootEnum, base + fieldName);
+				mainField.init(enumConst);
 
 				//process eventual subtypes
-				processModelTypeName(enumClass, base, fieldName, typeName);
+				processModelTypeName(classHolder, base, fieldName, typeName);
         		
         	}
 		}
@@ -333,7 +358,24 @@ public class MetadataGenerator extends AbstractMojo {
 	}
 
 
-	private void processModelTypeName(JDefinedClass enumClass, String base, String fieldName, String typeName)
+	private boolean isModel(ClassOrInterfaceType type) {
+		if (type.getTypeArgs() != null) {
+			for (Type typeArg : type.getTypeArgs()) {
+				String typeArgName = getTypeName(typeArg);
+				if (fullNamesMap.containsKey(typeArgName)) {
+					return true;
+				}
+			}
+		} 
+		if (fullNamesMap.containsKey(getTypeName(type))) {
+			return true;
+		} else {
+			return false;
+		}
+	}
+
+
+	private void processModelTypeName(JDefinedClassHolder classHolder, String base, String fieldName, String typeName)
 			throws ClassNotFoundException {
 		if (fullNamesMap.containsKey(typeName)) {
 			
@@ -341,7 +383,7 @@ public class MetadataGenerator extends AbstractMojo {
 			if (Collections.frequency(Lists.newArrayList(base.split("_")), fieldName) < depthLimit) {
 				
 				//compute all possibilities
-				processFields(typeName, fullNamesMap.get(typeName).fields, enumClass, base + fieldName + "_");
+				processFields(typeName, fullNamesMap.get(typeName).fields, base + fieldName + "_");
 				
 			}
 		}
