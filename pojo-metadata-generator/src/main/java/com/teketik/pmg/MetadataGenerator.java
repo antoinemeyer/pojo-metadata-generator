@@ -7,6 +7,7 @@ import japa.parser.ast.body.FieldDeclaration;
 import japa.parser.ast.type.ClassOrInterfaceType;
 import japa.parser.ast.type.PrimitiveType;
 import japa.parser.ast.type.ReferenceType;
+import japa.parser.ast.type.Type;
 import japa.parser.ast.visitor.VoidVisitorAdapter;
 
 import java.io.File;
@@ -19,13 +20,12 @@ import java.util.Map.Entry;
 
 import org.apache.maven.plugin.AbstractMojo;
 import org.apache.maven.plugin.MojoExecutionException;
-import org.apache.maven.plugins.annotations.Component;
 import org.apache.maven.plugins.annotations.Mojo;
 import org.apache.maven.plugins.annotations.Parameter;
 import org.apache.maven.plugins.annotations.ResolutionScope;
-import org.apache.maven.project.MavenProject;
 import org.codehaus.plexus.util.FileUtils;
 
+import com.google.common.base.Function;
 import com.google.common.base.Optional;
 import com.google.common.base.Predicate;
 import com.google.common.collect.Iterables;
@@ -40,6 +40,7 @@ import com.sun.codemodel.JExpr;
 import com.sun.codemodel.JFieldVar;
 import com.sun.codemodel.JMethod;
 import com.sun.codemodel.JMod;
+import com.sun.codemodel.JType;
 
 /**
  * @goal pmg
@@ -47,12 +48,6 @@ import com.sun.codemodel.JMod;
  */
 @Mojo(name = "pmg", requiresDependencyResolution = ResolutionScope.COMPILE)
 public class MetadataGenerator extends AbstractMojo {
-	
-	/**
-	 * @component
-	 */
-	@Component
-	private MavenProject project;
 
     /**
      * @parameter
@@ -156,38 +151,8 @@ public class MetadataGenerator extends AbstractMojo {
 
 				//add the package name to the class names
 				for (FieldDeclaration field : entry.getValue().fields) {
-					
-					final String typeName = getTypeName(field);
-	        		
-					//check if this field is in the import
-	        		Optional<ImportDeclaration> tryFind = Iterables.tryFind(entry.getValue().imports, new Predicate<ImportDeclaration>() {
-	        			@Override
-	        			public boolean apply(ImportDeclaration input) {
-	        				return input.getName().getName().equals(typeName);
-	        			}
-	        		});
-	        		if (tryFind.isPresent()) {
-	        			field.setType(new ClassOrInterfaceType(tryFind.get().getName().toString()));
-	        		} 
-	        		//if it is not in the imports
-	        		else {
-	        			//check if it is in another file in this package
-	        			Optional<String> tryFind2 = Iterables.tryFind(map.keySet(), new Predicate<String>() {
-	        				@Override
-	        				public boolean apply(String input) {
-								return input.split("\\.")[0].equals(typeName);
-	        				}
-	        			});
-	        			if (tryFind2.isPresent()) {
-	        				String fullName = packageName+"."+typeName;
-							field.setType(new ClassOrInterfaceType(fullName));
-	        				simpleNameToFullName.put(typeName, fullName);	        				
-	        			} 
-	        			//if it's not, it is a java.lang
-	        			else {
-	        				field.setType(new ClassOrInterfaceType("java.lang."+typeName));
-	        			}
-	        		}
+					Type appendMissingPackage = appendMissingPackage(packageName, entry.getValue().imports, field.getType());
+					field.setType(appendMissingPackage);
 					
 				}
 				
@@ -209,18 +174,76 @@ public class MetadataGenerator extends AbstractMojo {
 	}
 
 
-	private String getTypeName(FieldDeclaration field) {
+	private Type appendMissingPackage(final String packageName, final List<ImportDeclaration> imports, Type fieldType) {
+		final String typeName = getTypeName(fieldType);
+		//check if this field is in the import
+		Optional<ImportDeclaration> tryFind = Iterables.tryFind(imports, new Predicate<ImportDeclaration>() {
+			@Override
+			public boolean apply(ImportDeclaration input) {
+				return input.getName().getName().equals(typeName);
+			}
+		});
+		//if it is in the imports
+		if (tryFind.isPresent()) {
+			//process it (and keep its type args that we also need to process the same way)
+			ClassOrInterfaceType type = new ClassOrInterfaceType(tryFind.get().getName().toString());
+			if (fieldType instanceof ReferenceType) {
+				ReferenceType fieldCast = ((ReferenceType)fieldType);
+				if (fieldCast.getType() instanceof ClassOrInterfaceType) {
+					ClassOrInterfaceType fieldTypeCast = ((ClassOrInterfaceType)fieldCast.getType());
+					List<Type> typeArgs = fieldTypeCast.getTypeArgs();
+					if (typeArgs != null) {
+						type.setTypeArgs(Lists.transform(typeArgs, new Function<Type, Type>() {
+							@Override
+							public Type apply(Type input) {
+								return appendMissingPackage(packageName, imports, input);
+							}
+						}));
+					}
+				}
+			}
+			return type;
+		} 
+		//if it is not in the imports
+		else {
+			//check if it is in another file in this package
+			Optional<String> tryFind2 = Iterables.tryFind(map.keySet(), new Predicate<String>() {
+				@Override
+				public boolean apply(String input) {
+					return input.split("\\.")[0].equals(typeName);
+				}
+			});
+			if (tryFind2.isPresent()) {
+				String fullName = packageName+"."+typeName;
+				simpleNameToFullName.put(typeName, fullName);	        				
+				return new ClassOrInterfaceType(fullName);
+			} 
+			//if it's not, it is a java.lang
+			else {
+				return new ClassOrInterfaceType("java.lang."+typeName);
+			}
+		}
+	}
+
+	private String getTypeName(Type type) {
 		final String typeName;
-		if (field.getType() instanceof PrimitiveType) {
-			typeName = ((PrimitiveType) field.getType()).getType().name();
+		if (type instanceof PrimitiveType) {
+			typeName = ((PrimitiveType) type).getType().name();
+		} else if (type instanceof ClassOrInterfaceType){
+			typeName = ((ClassOrInterfaceType)type).getName();
 		} else {
-			typeName = ((ClassOrInterfaceType)((ReferenceType)field.getType()).getType()).getName();
+			typeName = ((ClassOrInterfaceType)((ReferenceType)type).getType()).getName();
 		}
 		return typeName;
 	}
 
 	
-
+	/*
+	 * http://namanmehta.blogspot.fr/2010/01/use-codemodel-to-generate-java-source.html
+	 * 
+	 * 
+	 */
+	
 	public void process(String clazz, List<FieldDeclaration> fields) throws MojoExecutionException {
 		
 		try {
@@ -230,17 +253,23 @@ public class MetadataGenerator extends AbstractMojo {
 			enumClass = cm._class(clazz+"MetaData", ClassType.ENUM)._implements(MetaData.class);
 			
 			//define field type
-	        JFieldVar typeField = enumClass.field(JMod.PRIVATE|JMod.FINAL, Class.class, "type");
+	        JFieldVar typeField = enumClass.field(JMod.PRIVATE|JMod.FINAL, cm.ref(Class.class), "type");
+	        JFieldVar typeArgsField = enumClass.field(JMod.PRIVATE|JMod.FINAL, cm.ref(Class.class).array(), "typeArgs");
 			
 	        //create constructor
 	        JMethod enumConstructor = enumClass.constructor(JMod.PRIVATE);
-	        enumConstructor.param(Class.class, "type");
+	        enumConstructor.param(cm.ref(Class.class), "type");
+	        enumConstructor.varParam(cm.ref(Class.class), "typeArgs");
 	        enumConstructor.body().assign(JExpr._this().ref ("type"), JExpr.ref("type"));
+	        enumConstructor.body().assign(JExpr._this().ref ("typeArgs"), JExpr.ref("typeArgs"));
 	        
 	        //getters
-	        JMethod getterFilterMethod = enumClass.method(JMod.PUBLIC, Class.class, "type");
-	        getterFilterMethod.body()._return(typeField);
+	        JMethod getterTypeMethod = enumClass.method(JMod.PUBLIC, cm.ref(Class.class), "type");
+	        getterTypeMethod.body()._return(typeField);
 	 
+	        JMethod getterTypeArgs = enumClass.method(JMod.PUBLIC, cm.ref(Class.class).array(), "typeArgs");
+	        getterTypeArgs.body()._return(typeArgsField);
+	        
 	        //then process all the fields
 	        boolean processed = processFields(clazz, fields, enumClass, "");
 
@@ -273,9 +302,10 @@ public class MetadataGenerator extends AbstractMojo {
 
         	//if not static
         	if (!Modifier.isStatic(field.getModifiers())) {
+        		ClassOrInterfaceType type = (ClassOrInterfaceType)field.getType();
 
         		String fieldName = field.getVariables().get(0).getId().getName();
-        		String typeName = ((ClassOrInterfaceType)field.getType()).getName();
+				String typeName = type.getName();
 
 				getLog().info("generating field: "+base + fieldName);
         		processed = true;
@@ -284,25 +314,37 @@ public class MetadataGenerator extends AbstractMojo {
         		JEnumConstant enumConst = enumClass.enumConstant(base + fieldName);
 				enumConst.arg(JExpr.direct(typeName+".class"));
 				
-        		//if this field is a subtype
-        		//or a collection of subtype
-//        		if (Collection.class.isAssignableFrom(type)) {//TODO check
-//					type = (Class<?>) ((ParameterizedType) field.getGenericType()).getActualTypeArguments()[0];
-//        		} else
-				if (fullNamesMap.containsKey(typeName)) {
-        			
-        			//if we have not reached the depth limit
-        			if (Collections.frequency(Lists.newArrayList(base.split("_")), fieldName) < depthLimit) {
-        				
-        				//compute all possibilities
-        				processFields(typeName, fullNamesMap.get(typeName).fields, enumClass, base + fieldName + "_");
-        				
-        			}
-        		}
+				//if this field is a collection
+				//process type args
+				if (type.getTypeArgs() != null) {
+					for (Type typeArg : type.getTypeArgs()) {
+						String typeArgName = getTypeName(typeArg);
+						processModelTypeName(enumClass, base, fieldName, typeArgName);
+						enumConst.arg(JExpr.direct(typeArgName+".class"));
+					}
+				}
+
+				//process eventual subtypes
+				processModelTypeName(enumClass, base, fieldName, typeName);
         		
         	}
 		}
 		return processed;
+	}
+
+
+	private void processModelTypeName(JDefinedClass enumClass, String base, String fieldName, String typeName)
+			throws ClassNotFoundException {
+		if (fullNamesMap.containsKey(typeName)) {
+			
+			//if we have not reached the depth limit
+			if (Collections.frequency(Lists.newArrayList(base.split("_")), fieldName) < depthLimit) {
+				
+				//compute all possibilities
+				processFields(typeName, fullNamesMap.get(typeName).fields, enumClass, base + fieldName + "_");
+				
+			}
+		}
 	}
 	
 	
