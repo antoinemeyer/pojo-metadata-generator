@@ -61,7 +61,7 @@ public class MetadataGenerator extends AbstractMojo {
 	private String[] packages;
 	  
 	/** 
-     * @parameter expression="${project.build.sourceDirectory}"
+     * @parameter property="project.build.sourceDirectory"
      */
 	@Parameter
     private File sourceDirectory;
@@ -175,9 +175,7 @@ public class MetadataGenerator extends AbstractMojo {
 	        			Optional<String> tryFind2 = Iterables.tryFind(map.keySet(), new Predicate<String>() {
 	        				@Override
 	        				public boolean apply(String input) {
-	        					String string = input.split("\\.")[0];
-	        					System.out.println(string + " - "+typeName);
-								return string.equals(typeName);
+								return input.split("\\.")[0].equals(typeName);
 	        				}
 	        			});
 	        			if (tryFind2.isPresent()) {
