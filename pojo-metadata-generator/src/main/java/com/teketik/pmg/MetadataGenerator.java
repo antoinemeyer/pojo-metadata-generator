@@ -13,10 +13,12 @@ import japa.parser.ast.visitor.VoidVisitorAdapter;
 import java.io.File;
 import java.io.IOException;
 import java.lang.reflect.Modifier;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.Set;
 
 import org.apache.maven.plugin.AbstractMojo;
 import org.apache.maven.plugin.MojoExecutionException;
@@ -31,16 +33,23 @@ import com.google.common.base.Predicate;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
-import com.sun.codemodel.ClassType;
+import com.sun.codemodel.JClass;
 import com.sun.codemodel.JClassAlreadyExistsException;
 import com.sun.codemodel.JCodeModel;
 import com.sun.codemodel.JDefinedClass;
 import com.sun.codemodel.JEnumConstant;
 import com.sun.codemodel.JExpr;
+import com.sun.codemodel.JExpression;
 import com.sun.codemodel.JFieldVar;
+import com.sun.codemodel.JInvocation;
 import com.sun.codemodel.JMethod;
 import com.sun.codemodel.JMod;
 import com.sun.codemodel.JType;
+import com.sun.codemodel.JVar;
+import com.teketik.pmg.metadata.FieldMetaData;
+import com.teketik.pmg.metadata.FirstDegreeMetadata;
+import com.teketik.pmg.metadata.MetaData;
+import com.teketik.pmg.metadata.ModelMetaData;
 
 /**
  * @goal pmg
@@ -87,8 +96,12 @@ public class MetadataGenerator extends AbstractMojo {
 	//simple name to fullname
 	private Map<String,String> simpleNameToFullName = Maps.newHashMap();
 
-	private JDefinedClassHolder classHolder;
+	private JDefinedClassHolder definedClassHolder;
+
+	private JDefinedClass _class;
 	
+	JCodeModel cm = new JCodeModel();
+
 	@SuppressWarnings("unchecked")
 	public void execute() throws MojoExecutionException {
 		getLog().info("--Processing Pojo Metadata Generator--");
@@ -160,14 +173,15 @@ public class MetadataGenerator extends AbstractMojo {
 				
 			}
 
-			//fill the missing packages in the full names map map
-			for (Entry<String, String> entry : simpleNameToFullName.entrySet()) {
+			//fill the missing packages in the full names map
+			Set<Entry<String, String>> simpleNameToFullNameEntrySet = simpleNameToFullName.entrySet();
+			for (Entry<String, String> entry : simpleNameToFullNameEntrySet) {
 				fullNamesMap.put(entry.getValue(), map.get(entry.getKey()));
 			}
 			
 			//now write all the model files
-			for (Entry<String, VisitResult> entry : fullNamesMap.entrySet()) {
-				process(entry.getKey(), entry.getValue().fields);
+			for (Entry<String, String> entry : simpleNameToFullNameEntrySet) {
+				process(packageName, entry.getKey(), entry.getValue(), map.get(entry.getKey()).fields);
 			}
 			
 		}
@@ -240,25 +254,27 @@ public class MetadataGenerator extends AbstractMojo {
 	}
 
 	private class JDefinedClassHolder {
-		private JDefinedClass main;
-		private JDefinedClass fields;
-		private JDefinedClass models;
+		private JDefinedClass modelFD;
+		private JDefinedClass fieldFD;
+		private JDefinedClass model;
+		private JDefinedClass field;
 	}
 	
-	public void process(String clazz, List<FieldDeclaration> fields) throws MojoExecutionException {
-		JCodeModel cm = new JCodeModel();
-		
+	public void process(String packageName, String simpleName, String clazz, List<FieldDeclaration> fields) throws MojoExecutionException {
+		definedClassHolder = new JDefinedClassHolder();
 		try {
-			classHolder = new JDefinedClassHolder();
+			//write the entity model first degree metadata
+			definedClassHolder.modelFD = writeMetadataClass(packageName, simpleName+"ModelFirstDegreeMetaData", cm.ref(ModelMetaData.class), cm.ref(FirstDegreeMetadata.class));
+			//write the entity field first degree metadata
+			definedClassHolder.fieldFD =writeMetadataClass(packageName, simpleName+"FieldFirstDegreeMetaData", cm.ref(FieldMetaData.class), cm.ref(FirstDegreeMetadata.class));
+			//write the entity model metadata
+			definedClassHolder.model = writeMetadataClass(packageName, simpleName+"ModelMetaData", cm.ref(ModelMetaData.class));
+			//write the entity field metadata
+			definedClassHolder.field = writeMetadataClass(packageName, simpleName+"FieldMetaData", cm.ref(FieldMetaData.class));
 			
-			classHolder.main = cm._class(clazz+"MetaData");
+			//then write the metadata itself
+			_class = cm._class(clazz+"MetaData");
 			
-			classHolder.fields = classHolder.main._enum("EmbeddedFieldMetaData")._implements(FieldMetaData.class);
-			classHolder.models = classHolder.main._enum("EmbeddedModelMetaData")._implements(ModelMetaData.class);
-			
-			generateEnum(cm, classHolder.fields);
-			generateEnum(cm, classHolder.models);
-	        
 	        //then process all the fields
 	        boolean processed = processFields(clazz, fields, "");
 
@@ -282,7 +298,23 @@ public class MetadataGenerator extends AbstractMojo {
 	}
 
 
-	private void generateEnum(JCodeModel cm, JDefinedClass enumClass) {
+	private JDefinedClass writeMetadataClass(String packageName, String className, JClass... interfaces) throws JClassAlreadyExistsException, ClassNotFoundException {
+		JDefinedClass asgasga = cm._class(packageName+".metadata."+className)._extends(cm.ref(MetaData.class).narrow(cm.parseType("T")));
+		asgasga.generify("T");
+		//process implementations
+		for (JClass jClass : interfaces) {
+			asgasga._implements(jClass.narrow(cm.parseType("T")));
+		}
+		//create constructor
+		JMethod enumConstructor = asgasga.constructor(JMod.PUBLIC);
+		enumConstructor.param(cm.ref(Class.class).narrow(cm.parseType("T")), "clazz");
+		enumConstructor.param(cm.ref(String.class), "identifier");
+		enumConstructor.body().invoke("super").arg(JExpr.ref("clazz")).arg(JExpr.ref("identifier"));
+		return asgasga;
+	}
+
+
+	private void generateEnum(JDefinedClass enumClass) {
 		//define field type
 		JFieldVar typeField = enumClass.field(JMod.PRIVATE|JMod.FINAL, cm.ref(Class.class), "type");
 		JFieldVar typeArgsField = enumClass.field(JMod.PRIVATE|JMod.FINAL, cm.ref(Class.class).array(), "typeArgs");
@@ -311,52 +343,69 @@ public class MetadataGenerator extends AbstractMojo {
 		for (FieldDeclaration field : fields) {
 
         	//if not static
-        	if (!Modifier.isStatic(field.getModifiers())) {
-        		ClassOrInterfaceType type = (ClassOrInterfaceType)field.getType();
+    		ClassOrInterfaceType type = (ClassOrInterfaceType)field.getType();
+    		if (!Modifier.isStatic(field.getModifiers())) {
 
         		String fieldName = field.getVariables().get(0).getId().getName();
 				String typeName = type.getName();
+				String fullName = base + fieldName;
 
-				getLog().info("generating field: "+base + fieldName);
+				getLog().info("generating field: " + fullName);
         		processed = true;
         		
-        		//define to which enum this field belongs to
-        		JDefinedClass enumClass;
-        		Class rootEnum;
+        		//define to which class this field belongs to
+        		JDefinedClass varType;
+        		boolean isFirstDegree = isFirstDegree(base);
         		if (isModel(type)) {
-        			enumClass = classHolder.models;
-        			rootEnum = ModelMetaData.class;
+        			varType = isFirstDegree ? definedClassHolder.modelFD : definedClassHolder.model;
         		} else {
-        			enumClass = classHolder.fields;
-        			rootEnum = FieldMetaData.class;
+        			varType = isFirstDegree ? definedClassHolder.fieldFD : definedClassHolder.field;
         		}
         		
-        		//write it
-        		JEnumConstant enumConst = enumClass.enumConstant(base + fieldName);
-        		enumConst.arg(JExpr.direct(typeName+".class"));
 
+        		boolean toReify = false;
+        		JClass boxify = cm.parseType(typeName).boxify();
+        		
         		//if this field is a collection
         		//process type args
+        		List<String> deferedTypeArgNames = Lists.newArrayList();
         		if (type.getTypeArgs() != null) {
         			for (Type typeArg : type.getTypeArgs()) {
         				String typeArgName = getTypeName(typeArg);
-        				processModelTypeName(classHolder, base, fieldName, typeArgName);
-        				enumConst.arg(JExpr.direct(typeArgName+".class"));
+        				deferedTypeArgNames.add(typeArgName);
+        				boxify = boxify.narrow(cm.parseType(typeArgName));
+        				toReify = true;
         			}
         		}
         		
-        		//write in the main
-        		JFieldVar mainField = classHolder.main.field(JMod.PUBLIC|JMod.STATIC|JMod.FINAL, rootEnum, base + fieldName);
-				mainField.init(enumConst);
+        		//write it
+				JClass narrowedVartype = varType.narrow(boxify);
+				JFieldVar enumConst = _class.field(JMod.PUBLIC|JMod.STATIC|JMod.FINAL, narrowedVartype, fullName);
+        		JExpression direct = JExpr.direct(typeName+".class");
+        		//cast it if reified
+        		if (toReify) {
+        			direct = JExpr.cast(cm.parseType("Class").boxify().narrow(cm.wildcard()), direct);
+        			direct = JExpr.cast(cm.parseType("Class").boxify().narrow(boxify), direct);
+        		}
+        		enumConst.init(JExpr._new(narrowedVartype).arg(direct).arg(JExpr.direct("\""+fullName.replaceAll("_", ".")+"\"")));
+        		
 
+        		//process defered type args
+        		for (String typeArgName : deferedTypeArgNames) {
+    				processModelTypeName(base, fieldName, typeArgName);
+				}
+        		
 				//process eventual subtypes
-				processModelTypeName(classHolder, base, fieldName, typeName);
+				processModelTypeName(base, fieldName, typeName);
         		
         	}
 		}
 		return processed;
 	}
 
+	private boolean isFirstDegree(String base) {
+		return base.equals("");
+	}
 
 	private boolean isModel(ClassOrInterfaceType type) {
 		if (type.getTypeArgs() != null) {
@@ -375,7 +424,7 @@ public class MetadataGenerator extends AbstractMojo {
 	}
 
 
-	private void processModelTypeName(JDefinedClassHolder classHolder, String base, String fieldName, String typeName)
+	private void processModelTypeName(String base, String fieldName, String typeName)
 			throws ClassNotFoundException {
 		if (fullNamesMap.containsKey(typeName)) {
 			
