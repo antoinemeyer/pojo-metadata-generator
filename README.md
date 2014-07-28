@@ -3,7 +3,7 @@ pojo-metadata-generator
 
 mojo to generate pojo meta data.<br>
 Work In Progress.<br>
-Use maven goal: <code>pmg:pmg</code>
+Use maven goal: <code>pmg:pmg</code> and add /target/pmg to your classpath.
 
 
 	<repositories>
