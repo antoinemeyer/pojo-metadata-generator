@@ -1,8 +1,9 @@
 pojo-metadata-generator
 =======================
 
-Generates pojo meta data.
-Work In Progress.
+mojo to generate pojo meta data.<br>
+Work In Progress.<br>
+Use maven goal: <code>pmg:pmg</code>
 
 
 	<repositories>
